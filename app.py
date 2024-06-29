@@ -1,5 +1,5 @@
 import os
-from flask import Flask, request, jsonify, Response, render_template, url_for
+from flask import Flask, request, jsonify, Response, render_template, url_for, redirect
 from ultralytics import YOLO
 import cv2
 from flask_pymongo import PyMongo
@@ -12,7 +12,6 @@ from flask_httpauth import HTTPBasicAuth
 from dotenv import load_dotenv
 from bson.objectid import ObjectId
 import uuid
-from pymongo import TEXT
 import datetime
 import locale
 
@@ -24,10 +23,10 @@ app.config['MONGO_URI'] = os.getenv('MONGO_URI')
 app.config['MAIL_SERVER'] = 'smtp.gmail.com'
 app.config['MAIL_PORT'] = 587
 app.config['MAIL_USE_TLS'] = True
-app.config['MAIL_USERNAME'] = 'restcountzy@gmail.com' #ganti pake email sendiri
-app.config['MAIL_PASSWORD'] = 'sdspgsziglytwpig' 
+app.config['MAIL_USERNAME'] = 'email@gmail.com' #ganti pake email sendiri
+app.config['MAIL_PASSWORD'] = '12345' 
 app.config["JWT_SECRET_KEY"] = os.getenv('JWT_SECRET_KEY')
-app.config['MAIL_DEFAULT_SENDER'] = 'restcountzy@gmail.com' #ganti pake email sendiri
+app.config['MAIL_DEFAULT_SENDER'] = 'email@gmail.com' #ganti pake email sendiri
 
 mongo = PyMongo(app)
 model = YOLO("model/restcount.pt")
@@ -39,11 +38,13 @@ auth = HTTPBasicAuth()
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
 
+
 google_bp = make_google_blueprint(client_id=os.getenv('GOOGLE_CLIENT_ID'), client_secret=os.getenv('GOOGLE_CLIENT_SECRET'), redirect_to='google_login')
 app.register_blueprint(google_bp, url_prefix='/login')
 
 # Define the collection
 predictions_collection = mongo.db.predictions
+counts_collection = mongo.db.counts
 
 class User(UserMixin):
     def __init__(self, user_data):
@@ -109,21 +110,81 @@ def decodetoken(jwtToken):
     decode_result = decode_token(jwtToken)
     return decode_result
 
-def save_to_mongodb(predictions):
+def save_to_mongodb(predictions, location):
+    counts = {}
+
     for result in predictions:
         if result.boxes is not None and len(result.boxes) > 0:
             current_date = datetime.datetime.now().strftime('%d-%m-%Y')
             current_time = datetime.datetime.now().strftime('%H:%M:%S')
             day_of_week = datetime.datetime.now().strftime('%A')
+
             for pred in result.boxes[0]:
                 class_index = int(pred.cls[0])
                 class_name = model.names[class_index]
+
+                # Update counts dictionary
+                if class_name in counts:
+                    counts[class_name] += 1
+                else:
+                    counts[class_name] = 1
+
+                # Insert prediction into MongoDB
                 predictions_collection.insert_one({
                     'label': class_name,
                     'tanggal': current_date,
                     'hari': day_of_week,
-                    'waktu': current_time
+                    'waktu': current_time,
+                    'location': location
                 })
+
+    # Save counts to MongoDB
+    counts_collection.insert_one({
+        'counts': counts
+    })
+
+    # Optionally, you can log counts
+    print("Counts:", counts)
+
+@app.route('/')
+def index():
+    return render_template('video.html')
+
+def generate_frames(location):
+    webcam_index = 'data/jalan.mp4' 
+    cap = cv2.VideoCapture(webcam_index)
+
+    if not cap.isOpened():
+        raise RuntimeError("Error: Could not open video file.")
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        # Predict with YOLO model
+        results = model(frame)
+        save_to_mongodb(results, location)
+
+        # Draw bounding box on the frame
+        annotated_frame = results[0].plot()
+
+        # Convert the frame to JPEG format
+        ret, buffer = cv2.imencode('.jpg', annotated_frame)
+        frame = buffer.tobytes()
+
+        # Yield the frame as a byte array
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+
+    cap.release()
+
+@app.route('/video_feed', methods=['GET', 'POST'])
+def video_feed():
+    if request.method == 'POST':
+        location = request.form.get('location')
+        return Response(generate_frames(location), mimetype='multipart/x-mixed-replace; boundary=frame')
+    return jsonify({"message": "Method not allowed"}), 405
 
 @app.route('/register', methods=['POST'])
 def register():
@@ -215,8 +276,8 @@ def logout():
 def update_password():
     try:
         data = request.json
-        current_password = data.get('current_password')
-        new_password = data.get('new_password')
+        current_password = data.get('Password lama')
+        new_password = data.get('Password baru')
 
         if not current_password or not new_password:
             return jsonify({"message": "Missing current password or new password"}), 400
@@ -234,48 +295,147 @@ def update_password():
     except Exception as e:
         return jsonify({"message": f"An error occurred: {str(e)}"}), 500
 
-#######################################################################################
+@app.route('/edit_profile', methods=['POST'])
+@login_required
+def edit_profile():
+    try:
+        data = request.form
+        username = data.get('username')
+        photo = request.files.get('photo')
 
-@app.route('/')
-def index():
-    return render_template('video.html')
+        if not username:
+            return jsonify({"message": "Missing username"}), 400
 
-def generate_frames():
-    webcam_index = 'data/jalan.mp4' 
-    cap = cv2.VideoCapture(webcam_index)
+        user_data = mongo.db.users.find_one({"_id": ObjectId(current_user.id)})
+        if not user_data:
+            return jsonify({"message": "User not found"}), 404
 
-    # video_url = 'https://jid.jasamarga.com/cctv2/cf48437?tx=1681720323832'
-    # cap = cv2.VideoCapture(video_url)
+        update_data = {
+            'username': username
+        }
 
-    if not cap.isOpened():
-        raise RuntimeError("Error: Could not open video file.")
+        if photo:
+            photo_filename = f"{current_user.id}.jpg"
+            photo.save(os.path.join('static/uploads', photo_filename))
+            update_data['photo'] = photo_filename
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+        mongo.db.users.update_one({'_id': ObjectId(current_user.id)}, {'$set': update_data})
 
-        # Predict with YOLO model
-        results = model(frame)
-        save_to_mongodb(results)
+        return jsonify({"message": "Profile updated successfully"}), 200
 
-        # Draw bounding box on the frame
-        annotated_frame = results[0].plot()
+    except Exception as e:
+        return jsonify({"message": f"An error occurred: {str(e)}"}), 500
 
-        # Convert the frame to JPEG format
-        ret, buffer = cv2.imencode('.jpg', annotated_frame)
-        frame = buffer.tobytes()
+@app.route('/change_email', methods=['POST'])
+@login_required
+def change_email():
+    try:
+        data = request.json
+        new_email = data.get('new_email')
 
-        # Yield the frame as a byte array
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+        if not new_email:
+            return jsonify({"message": "Missing new email"}), 400
 
-    cap.release()
+        user_data = mongo.db.users.find_one({"_id": ObjectId(current_user.id)})
+        if not user_data:
+            return jsonify({"message": "User not found"}), 404
+
+        # Send email confirmation
+        token = create_access_token(identity=str(current_user.id), expires_delta=False)
+        msg = Message('Email Change Confirmation', recipients=[new_email])
+        msg.body = f'Your email change confirmation token is: {token}'
+        mail.send(msg)
+
+        return jsonify({"message": "Email change confirmation sent. Please check your inbox."}), 200
+
+    except Exception as e:
+        return jsonify({"message": f"An error occurred: {str(e)}"}), 500
+
+@app.route('/confirm_change_email', methods=['POST'])
+def confirm_change_email():
+    bearer_auth = request.headers.get('Authorization', None)
+    if not bearer_auth:
+        return {"message": "Authorization header missing"}, 401
+
+    try:
+        jwt_token = bearer_auth.split()[1]
+        token = decode_token(jwt_token)
+        user_id = token.get('sub')
+
+        if not user_id:
+            return {"message": "Token payload is invalid"}, 401
+
+        user = mongo.db.users.find_one({"_id": ObjectId(user_id)})
+        if not user:
+            return jsonify({"message": "User not found"}), 404
+
+        data = request.json
+        new_email = data.get('new_email')
+
+        if not new_email:
+            return jsonify({"message": "New email not provided"}), 400
+
+        mongo.db.users.update_one({"_id": ObjectId(user_id)}, {"$set": {"email": new_email}})
+        return jsonify({"message": "Email changed successfully"}), 200
+
+    except Exception as e:
+        return jsonify({"message": f"An error occurred: {str(e)}"}), 500
+
+@app.route('/profile', methods=['GET'])
+@login_required
+def profile():
+    try:
+        user_data = mongo.db.users.find_one({"_id": ObjectId(current_user.id)})
+        if not user_data:
+            return jsonify({"message": "User not found"}), 404
+
+        profile_data = {
+            'username': user_data['username'],
+            'email': user_data['email'],
+            'photo': url_for('static', filename='uploads/' + user_data.get('photo', 'default_profile.jpg'))
+        }
+
+        return jsonify(profile_data), 200
+
+    except Exception as e:
+        return jsonify({"message": f"An error occurred: {str(e)}"}), 500
 
 
-@app.route('/video_feed')
-def video_feed():
-    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+@app.route('/forgot_password', methods=['POST'])
+def forgot_password():
+    data = request.json
+    email = data.get('email')
+
+    if not email:
+        return jsonify({"message": "Missing email"}), 400
+
+    user_data = User.find_by_email(email)
+    if not user_data:
+        return jsonify({"message": "User not found"}), 404
+
+    # Kirim email reset password
+    token = create_access_token(identity=str(user_data['_id']), expires_delta=False)
+    msg = Message('Password Reset', recipients=[email])
+    msg.body = f'Your password reset link is: {url_for("reset_password", token=token, _external=True)}'
+    mail.send(msg)
+
+    return jsonify({"message": "Password reset email sent. Please check your inbox."}), 200
+
+
+@app.route('/google_login')
+def google_login():
+    if not google.authorized:
+        return redirect(url_for('google.login'))
+
+    resp = google.get('/oauth2/v1/userinfo')
+    user_info = resp.json()
+
+    user = User.find_by_google_id(user_info['id'])
+    if not user:
+        user = User.create_user(username=user_info['name'], email=user_info['email'], google_id=user_info['id'])
+
+    login_user(User(user))
+    return jsonify({"message": "Login successful"}), 200
 
 if __name__ == '__main__':
     app.run(debug=True, host='192.168.0.175', port=5000)

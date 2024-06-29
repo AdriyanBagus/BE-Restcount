@@ -5,6 +5,18 @@
   </head>
   <body>
     <h1>Webcam Feed</h1>
-    <img src="{{ url_for('video_feed') }}" width="640" height="480" />
+    <form action="{{ url_for('video_feed') }}" method="POST">
+      <label for="location">Choose a location:</label>
+      <select id="location" name="location">
+        <option value="Rest Area A">Rest Area A</option>
+        <option value="Rest Area B">Rest Area B</option>
+        <option value="Rest Area C">Rest Area C</option>
+        <!-- Add more options as needed -->
+      </select>
+      <button type="submit">Start Feed</button>
+    </form>
+    {% if location %}
+      <img src="{{ url_for('video_feed', location=location) }}" width="640" height="480" />
+    {% endif %}
   </body>
 </html>
