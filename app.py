@@ -1,6 +1,18 @@
 import os
-from flask import Flask, request, jsonify, Response, render_template, url_for, redirect
+from flask import Flask, request, jsonify, Response, render_template,render_template_string, url_for, redirect
+from flask import Flask,redirect,render_template, jsonify, render_template_string, Response
+from markupsafe import escape
+from flask import request
+from flask import Flask
+from flask import jsonify
+from flask import request, session
+import base64
+from werkzeug.utils import secure_filename
+import os
+from bson import ObjectId
+from datetime import datetime
 from ultralytics import YOLO
+from ultralytics.solutions import object_counter
 import cv2
 from flask_pymongo import PyMongo
 from flask_bcrypt import Bcrypt
@@ -12,8 +24,11 @@ from flask_httpauth import HTTPBasicAuth
 from dotenv import load_dotenv
 from bson.objectid import ObjectId
 import uuid
+import secrets
 import datetime
 import locale
+from flask_cors import CORS
+from shapely.geometry import Polygon, Point
 
 load_dotenv()
 
@@ -23,10 +38,10 @@ app.config['MONGO_URI'] = os.getenv('MONGO_URI')
 app.config['MAIL_SERVER'] = 'smtp.gmail.com'
 app.config['MAIL_PORT'] = 587
 app.config['MAIL_USE_TLS'] = True
-app.config['MAIL_USERNAME'] = 'email@gmail.com' #ganti pake email sendiri
-app.config['MAIL_PASSWORD'] = '12345' 
+app.config['MAIL_USERNAME'] = 'restcountzy@gmail.com' #ganti pake email sendiri
+app.config['MAIL_PASSWORD'] = 'sdspgsziglytwpig' 
 app.config["JWT_SECRET_KEY"] = os.getenv('JWT_SECRET_KEY')
-app.config['MAIL_DEFAULT_SENDER'] = 'email@gmail.com' #ganti pake email sendiri
+app.config['MAIL_DEFAULT_SENDER'] = 'restcountzy@gmail.com' #ganti pake email sendiri
 
 mongo = PyMongo(app)
 model = YOLO("model/restcount.pt")
@@ -38,6 +53,7 @@ auth = HTTPBasicAuth()
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
 
+CORS(app)
 
 google_bp = make_google_blueprint(client_id=os.getenv('GOOGLE_CLIENT_ID'), client_secret=os.getenv('GOOGLE_CLIENT_SECRET'), redirect_to='google_login')
 app.register_blueprint(google_bp, url_prefix='/login')
@@ -45,6 +61,10 @@ app.register_blueprint(google_bp, url_prefix='/login')
 # Define the collection
 predictions_collection = mongo.db.predictions
 counts_collection = mongo.db.counts
+
+# Inisialisasi YOLO model dan object counter
+region_of_interest = [(300, 20), (302, 680), (280, 680), (280, 20)]
+counter = object_counter.ObjectCounter(classes_names=model.names, view_img=True, reg_pts=region_of_interest, draw_tracks=True)
 
 class User(UserMixin):
     def __init__(self, user_data):
@@ -62,7 +82,7 @@ class User(UserMixin):
             "password": bcrypt.generate_password_hash(password).decode('utf-8') if password else None,
             "google_id": google_id,
             "is_verified": False,
-            "api_key": str(uuid.uuid4())
+            "api_key": secrets.token_hex(16)
         }
         result = mongo.db.users.insert_one(user)
         user['_id'] = str(result.inserted_id)  # Convert ObjectId to string
@@ -110,24 +130,16 @@ def decodetoken(jwtToken):
     decode_result = decode_token(jwtToken)
     return decode_result
 
-def save_to_mongodb(predictions, location):
-    counts = {}
+def save_to_mongodb(predictions, location, counts):
+    current_date = datetime.datetime.now().strftime('%d-%m-%Y')
+    current_time = datetime.datetime.now().strftime('%H:%M:%S')
+    day_of_week = datetime.datetime.now().strftime('%A')
 
     for result in predictions:
         if result.boxes is not None and len(result.boxes) > 0:
-            current_date = datetime.datetime.now().strftime('%d-%m-%Y')
-            current_time = datetime.datetime.now().strftime('%H:%M:%S')
-            day_of_week = datetime.datetime.now().strftime('%A')
-
             for pred in result.boxes[0]:
                 class_index = int(pred.cls[0])
                 class_name = model.names[class_index]
-
-                # Update counts dictionary
-                if class_name in counts:
-                    counts[class_name] += 1
-                else:
-                    counts[class_name] = 1
 
                 # Insert prediction into MongoDB
                 predictions_collection.insert_one({
@@ -140,51 +152,81 @@ def save_to_mongodb(predictions, location):
 
     # Save counts to MongoDB
     counts_collection.insert_one({
-        'counts': counts
+        'counts': counts,
+        'tanggal': current_date,
+        'location': location
     })
 
-    # Optionally, you can log counts
-    print("Counts:", counts)
 
+# Define ROI and Object Counter
+region_of_interest = [(20, 300), (830, 302), (830, 280), (0, 280)]
+classes_names = model.names  # Assuming model.names provides the classes names as a list
+counter = object_counter.ObjectCounter(classes_names=classes_names, view_img=True, reg_pts=region_of_interest, draw_tracks=True)
+
+lokasi = ""
+
+# Realtime Object Detection & Counting
 @app.route('/')
 def index():
     return render_template('video.html')
 
-def generate_frames(location):
-    webcam_index = 'data/jalan.mp4' 
-    cap = cv2.VideoCapture(webcam_index)
-
-    if not cap.isOpened():
-        raise RuntimeError("Error: Could not open video file.")
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        # Predict with YOLO model
-        results = model(frame)
-        save_to_mongodb(results, location)
-
-        # Draw bounding box on the frame
-        annotated_frame = results[0].plot()
-
-        # Convert the frame to JPEG format
-        ret, buffer = cv2.imencode('.jpg', annotated_frame)
-        frame = buffer.tobytes()
-
-        # Yield the frame as a byte array
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-
-    cap.release()
-
 @app.route('/video_feed', methods=['GET', 'POST'])
 def video_feed():
-    if request.method == 'POST':
-        location = request.form.get('location')
-        return Response(generate_frames(location), mimetype='multipart/x-mixed-replace; boundary=frame')
-    return jsonify({"message": "Method not allowed"}), 405
+    location = request.form.get('location')
+    if location:
+        return Response(count_objects(location), mimetype='multipart/x-mixed-replace; boundary=frame')
+    return redirect(url_for('index'))
+
+def count_objects(location):
+    cap = cv2.VideoCapture('data/jalan2.mp4')
+    assert cap.isOpened()
+    tracked_ids = set()
+    
+    while True:
+        success, frame = cap.read()
+        if not success:
+            break
+        
+        # Detect and track objects
+        results = model.track(frame, persist=True, show=False)
+        frame = counter.start_counting(frame, results)
+
+        for result in results:
+            if result.boxes.id is not None:
+                boxes = result.boxes.xyxy.cpu()
+                clss = result.boxes.cls.cpu().tolist()
+                track_ids = result.boxes.id.int().cpu().tolist()
+
+                for box, track_id, cls in zip(boxes, track_ids, clss):
+                    if track_id not in tracked_ids:
+                        prev_position = counter.track_history[track_id][-2] if len(counter.track_history[track_id]) > 1 else None
+                        current_position = (float((box[0] + box[2]) / 2), float((box[1] + box[3]) / 2))
+
+                        if len(region_of_interest) >= 3:
+                            counting_region = Polygon(region_of_interest)
+                            is_inside = counting_region.contains(Point(current_position))
+
+                            if prev_position and is_inside:
+                                tracked_ids.add(track_id)
+                                now = datetime.datetime.now()
+                                date = now.date().isoformat()
+                                day_name = now.strftime('%A')
+                                counts = {model.names[cls]: 1}
+
+                                # Save to MongoDB
+                                counts_collection.update_one(
+                                    {'date': str(date), 'day': day_name, 'location': location},
+                                    {'$inc': {f'counts.{key}': value for key, value in counts.items()},
+                                    '$setOnInsert': {'date': str(date), 'day': day_name, 'location': location}},
+                                    upsert=True
+                                )
+
+        ret, buffer = cv2.imencode('.jpg', frame)
+        frame = buffer.tobytes()
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+    
+    cap.release()
 
 @app.route('/register', methods=['POST'])
 def register():
@@ -315,8 +357,9 @@ def edit_profile():
         }
 
         if photo:
-            photo_filename = f"{current_user.id}.jpg"
-            photo.save(os.path.join('static/uploads', photo_filename))
+            projectPath = "/home/student/21090007/flask/"
+            photo_filename = f"{secrets.token_hex(16)}.jpg"
+            photo.save(os.path.join(projectPath, 'upload', photo_filename))
             update_data['photo'] = photo_filename
 
         mongo.db.users.update_one({'_id': ObjectId(current_user.id)}, {'$set': update_data})
@@ -369,14 +412,9 @@ def confirm_change_email():
         if not user:
             return jsonify({"message": "User not found"}), 404
 
-        data = request.json
-        new_email = data.get('new_email')
-
-        if not new_email:
-            return jsonify({"message": "New email not provided"}), 400
-
-        mongo.db.users.update_one({"_id": ObjectId(user_id)}, {"$set": {"email": new_email}})
-        return jsonify({"message": "Email changed successfully"}), 200
+        # Update email verification status or perform other necessary actions
+        mongo.db.users.update_one({"_id": ObjectId(user_id)}, {"$set": {"is_email_verified": True}})
+        return jsonify({"message": "Email verification successful"}), 200
 
     except Exception as e:
         return jsonify({"message": f"An error occurred: {str(e)}"}), 500
@@ -438,4 +476,4 @@ def google_login():
     return jsonify({"message": "Login successful"}), 200
 
 if __name__ == '__main__':
-    app.run(debug=True, host='192.168.0.175', port=5000)
+    app.run(debug=True, host='192.168.0.119', port=5000)

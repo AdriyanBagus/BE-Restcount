@@ -1,22 +1,42 @@
 <!DOCTYPE html>
-<html lang="en">
-  <head>
-    <title>Webcam Feed</title>
-  </head>
-  <body>
-    <h1>Webcam Feed</h1>
-    <form action="{{ url_for('video_feed') }}" method="POST">
-      <label for="location">Choose a location:</label>
-      <select id="location" name="location">
-        <option value="Rest Area A">Rest Area A</option>
-        <option value="Rest Area B">Rest Area B</option>
-        <option value="Rest Area C">Rest Area C</option>
-        <!-- Add more options as needed -->
-      </select>
-      <button type="submit">Start Feed</button>
-    </form>
-    {% if location %}
-      <img src="{{ url_for('video_feed', location=location) }}" width="640" height="480" />
-    {% endif %}
-  </body>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YOLO Object Counter</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            background-color: #f8f9fa;
+        }
+        h1 {
+            color: #343a40;
+        }
+        .video-container {
+            margin-top: 50px;
+        }
+        .video-container video {
+            width: 80%;
+            border: 2px solid #343a40;
+        }
+    </style>
+</head>
+<body>
+    <h1>YOLO Object Counter</h1>
+    <div class="video-container">
+        <form action="{{ url_for('video_feed') }}" method="POST">
+            <label for="location">Choose a location:</label>
+            <select id="location" name="location">
+                <option value="Rest Area A">Rest Area A</option>
+                <option value="Rest Area B">Rest Area B</option>
+                <option value="Rest Area C">Rest Area C</option>
+            </select>
+            <button type="submit">Start Feed</button>
+        </form>
+        <!-- <video controls autoplay>
+            <source src="{{ url_for('video_feed') }}" type="multipart/x-mixed-replace; boundary=frame">
+        </video> -->
+    </div>
+</body>
 </html>
